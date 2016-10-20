@@ -68,7 +68,7 @@
          
          if (!!tableau.connectionData) {
              // We have a room!
-             schemaCallback([msgsTable, usersTable, msgsWordCloudTable]);
+             schemaCallback([msgsTable, msgsWordCloudTable]);
          } else {
             schemaCallback([roomsTable, usersTable]);
          }
