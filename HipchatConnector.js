@@ -332,7 +332,7 @@ myConnector.getData = function(table, doneCallback) {
         });
         $('#sel1').change(updateUi);
         $("#access_token").keyup(updateUi);
-        $("#access_token").val(tableau.password || "bxIczbIYt8Kxi82On6s76LUIzb78TCbu5desyXcq");
+        $("#access_token").val(tableau.password);
 
         updateUi();
     });
