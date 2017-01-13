@@ -1,4 +1,22 @@
 (function() {
+
+    var getRows = function(url, dataProcessingFn, dataDoneCallback) {
+        var fullUrl = url + "&auth_token=" + tableau.password;
+        $.getJSON(fullUrl)
+        .then(function(data) {
+            var nextUrl = dataProcessingFn(data);
+            if (!!nextUrl) {
+                getRows(nextUrl, dataProcessingFn, dataDoneCallback);
+            } else {
+                dataDoneCallback();
+            }
+        }).fail(function(e, a, c) {
+            console.log("Error occured");
+            dataDoneCallback();
+        });
+    };
+
+
     var myConnector = tableau.makeConnector();
     
     myConnector.getSchema = function(schemaCallback) {
@@ -7,8 +25,6 @@
              { id: "privacy", dataType: "string" },
              { id: "roomId", dataType: "int" },
              { id: "link", dataType: "string" },
-             // { id: "last_active", dataType: "datetime" },
-             // { id: "messages_sent", dataType: "int" }
          ]
          
          var roomsTable = {
@@ -18,7 +34,7 @@
          };
          
          var userCols = [
-            { id: "user_id", dataType: "int", alias: "User Id" },
+            { id: "user_id", dataType: "string", alias: "User Id", "filterable" : true },
             { id: "name", dataType: "string", alias: "User Name" },
             { id: "mention_name", dataType: "string", alias: "User Mention (@) Name"},
             { id: "title", dataType: "string" },
@@ -33,13 +49,14 @@
          ];
          
          var usersTable = {
+             joinOnly : true,
              alias: "Users",
              id: "users",
              columns: userCols
          }
          
          var msgsCols = [
-            { id: "from_id", dataType: "int", alias: "From User Id" },
+            { id: "from_id", dataType: "string", alias: "From User Id", "foreignKey" : { "tableId" : "users" , "columnId" : "user_id"} },
             { id: "from_name", dataType: "string", alias: "From Name" },
             { id: "from_mention_name", dataType: "string", alias: "From Mention Name" },
             { id: "message", dataType: "string", alias: "Message" },
@@ -53,7 +70,7 @@
          };
          
          var msgWordCloudCols = [
-            { id: "from_id", dataType: "int", alias: "From User Id" },
+            { id: "from_id", dataType: "string", alias: "From User Id" },
             { id: "from_name", dataType: "string", alias: "From Name" },
             { id: "from_mention_name", dataType: "string", alias: "From Mention Name" },
             { id: "word", dataType: "string", alias: "Word" },
@@ -68,7 +85,7 @@
          
          if (!!tableau.connectionData) {
              // We have a room!
-             schemaCallback([msgsTable, msgsWordCloudTable]);
+             schemaCallback([msgsTable, msgsWordCloudTable, usersTable]);
          } else {
             schemaCallback([roomsTable, usersTable]);
          }
@@ -78,23 +95,10 @@
     
 myConnector.getData = function(table, doneCallback) {
     var pw = tableau.password;
-    var getRows = function(url, dataProcessingFn, dataDoneCallback) {
-        var fullUrl = url + "&auth_token=" + pw;
-        $.getJSON(fullUrl)
-        .then(function(data) {
-            var nextUrl = dataProcessingFn(data);
-            if (!!nextUrl) {
-                getRows(nextUrl, dataProcessingFn, dataDoneCallback);
-            } else {
-                dataDoneCallback();
-            }
-        }).fail(function(e, a, c) {
-            console.log("Error occured");
-            doneCallback();
-        });
-    };
+
     
     if (table.tableInfo.id == "rooms") {
+
         var startUrl = "https://api.hipchat.com/v2/room?&max-results=100";
         var processRooms = function(data) {
             var results = [];
@@ -122,8 +126,6 @@ myConnector.getData = function(table, doneCallback) {
                 }
                 
                 results.push(row);
-                
-                // getStatsFn(item.id, row);
             }
             
             table.appendRows(results);
@@ -137,13 +139,16 @@ myConnector.getData = function(table, doneCallback) {
         
         getRows(startUrl, processRooms, doneCallback);
     } else if (table.tableInfo.id == "users") {
-        if (!table.isFiltered) {
+        if (!table.isJoinFiltered) {
             tableau.abortWithError("Users must be filtered!");
             return;
         } else {
+            var startCount = table.filterValues.length;
+            tableau.reportProgress("Loading data for " + startCount + " users.");
             var filterValues = table.filterValues;
             var usersStartUrl = "https://api.hipchat.com/v2/user/";
             var requestNextValue = function() {
+                tableau.reportProgress("Fetched " + (startCount - filterValues.length).toString() + " of " + startCount + " users.");
                 if (filterValues.length == 0) {
                     // we've read through all of the filterValues we were asked 
                     // to retrieve. We're done with this table!
@@ -197,7 +202,7 @@ myConnector.getData = function(table, doneCallback) {
     } else if (table.tableInfo.id == "messages" || table.tableInfo.id =="messages_wordCloud") {
         var isWordCloud = table.tableInfo.id =="messages_wordCloud";
         
-        var roomId = encodeURIComponent(tableau.connectionData);
+        var roomId = encodeURIComponent(JSON.parse(tableau.connectionData).room);
         date = "recent";
         var startUrl = "https://api.hipchat.com/v2/room/" + roomId + "/history?max-results=1000&reverse=false&date=" + date;
         
@@ -243,6 +248,7 @@ myConnector.getData = function(table, doneCallback) {
             if (data.items.length > 0) {
                 // we keep going
                 var newDate = data.items[data.items.length - 1].date;
+                tableau.reportProgress("Fetched messages back until " + newDate);
                 newDate = newDate.replace("+", "%2B");
                 var newUrl = "https://api.hipchat.com/v2/room/" + roomId + "/history?max-results=1000&reverse=false&date=" + newDate;
                 return newUrl;
@@ -255,17 +261,63 @@ myConnector.getData = function(table, doneCallback) {
     }
 };
 
+    var rooms = [];
+    var loadRooms = function() {
+        rooms = [];
+
+        var setupSelect = function() {
+            $('#sel1').empty();
+            $.each(rooms, function (i, item) {
+                $('#sel1').append($('<option>' + item + '</option>', { 
+                    value: item,
+                    text: item
+                }));
+            });
+            $('#sel1').selectpicker('refresh');
+        }
+
+        var startUrl = "https://api.hipchat.com/v2/room?&max-results=1000";
+        var processRooms = function(data) {
+            for(var i =0; i<data.items.length; i++) {
+                var name = data.items[i].name;
+                rooms.push(name);
+            }
+            
+            if (!!data.links && !!data.links.next) {
+                return data.links.next;
+            } else {
+                return undefined;
+            }
+        }
+
+        getRows(startUrl, processRooms, setupSelect);
+    }
+
      setupConnector = function() {
         tableau.connectionName = "HipChat Connector";
         tableau.password = $("#access_token").val();
-        tableau.connectionData = $("#room_name").val();
+        var connData = {
+            "room" : $("#sel1 option:selected").text(),
+            "rooms" : rooms
+        };
+
+        tableau.connectionData = JSON.stringify(connData); // $("#sel1 option:selected").text();
         tableau.authType = "basic";
         tableau.submit();
      };
 
     tableau.registerConnector(myConnector);
 
+    var updateUi = function() {
+        var hasAccessToken = !!$("#access_token").val();
+        $("#load_rooms_button").prop("disabled", !hasAccessToken);
+        var hasRoom = !!$("#sel1 option:selected").text();
+        $("#submitButton").prop("disabled", !hasRoom);
+    }
+
     $(document).ready(function() {
+        updateUi();
+
         $("#submitButton").click(function() { // This event fires when a button is clicked
             setupConnector();
         });
@@ -273,8 +325,15 @@ myConnector.getData = function(table, doneCallback) {
             event.preventDefault();
             setupConnector();
         });
-        
-        $("#access_token").val(tableau.password || "");
-        $("#room_name").val(tableau.connectionData || "");
+
+        $("#load_rooms_button").click(function() {
+            tableau.password = $("#access_token").val();
+            loadRooms();
+        });
+        $('#sel1').change(updateUi);
+        $("#access_token").keyup(updateUi);
+        $("#access_token").val(tableau.password || "bxIczbIYt8Kxi82On6s76LUIzb78TCbu5desyXcq");
+
+        updateUi();
     });
 })();
